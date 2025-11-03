@@ -4,3 +4,7 @@ logs/
 debug_subscription.py
 bot_database.db
 debug_subscription.py
+config_github.py
+temp_voice_files/
+temp_photo_files/
+*.log

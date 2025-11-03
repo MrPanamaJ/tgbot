@@ -2,6 +2,7 @@ import sys
 import logging
 import signal
 import time
+import os
 from pathlib import Path
 from typing import List, Optional
 
@@ -17,8 +18,10 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 # Версия бота
-BOT_VERSION = "1.0.0"
+BOT_VERSION = "1.0.0-GitHub"
 
+# Определяем, работаем ли на GitHub Actions
+IS_GITHUB_ACTIONS = os.getenv('GITHUB_ACTIONS') is not None
 
 def import_with_fallback(module_name, class_name, fallback_value=None):
     """Импорт с обработкой ошибок"""
@@ -31,16 +34,38 @@ def import_with_fallback(module_name, class_name, fallback_value=None):
         )
         return fallback_value
 
+# Попытка импорта конфигурации
+try:
+    if IS_GITHUB_ACTIONS:
+        # Используем конфигурацию для GitHub Actions
+        from config_github import config
+        logger.info("🔧 Используется GitHub Actions конфигурация")
+    else:
+        # Локальная конфигурация
+        from config import config
+        logger.info("🔧 Используется локальная конфигурация")
+        
+except ImportError as e:
+    logger.error(f"❌ Ошибка импорта конфигурации: {e}")
+    
+    # Создаем базовую конфигурацию как fallback
+    class FallbackConfig:
+        def __init__(self):
+            self.BOT_TOKEN = os.getenv('BOT_TOKEN')
+            self.WEATHER_API_URL = os.getenv('WEATHER_API_URL', 'https://api.open-meteo.com/v1/forecast')
+            self.DATABASE_CONFIG = {'database': ':memory:'}
+            self.VOICE_FILES_DIR = 'temp_voice_files'
+            self.PHOTO_FILES_DIR = 'temp_photo_files'
+            self.MAX_NOTE_LENGTH = 4000
+            self.MAX_HABIT_NAME_LENGTH = 100
+    
+    config = FallbackConfig()
+    logger.info("🔧 Используется fallback конфигурация")
 
 # Попытка импорта основных модулей
 try:
     from telebot import TeleBot
-    from config import config
-    from database.operations import DatabaseManager
-    from services.weather_api import WeatherService
-    from services.scheduler import start_scheduler
-    from utils.keyboards import KeyboardManager
-
+    
     # Импортируем обработчики с обработкой ошибок
     from handlers.base import StartHandler, HelpHandler
     from handlers.weather import WeatherHandler
@@ -50,10 +75,34 @@ try:
     from handlers.utilities import UtilitiesHandler
     from handlers.services import ServicesHandler
 
+    # Базовые сервисы
+    from utils.keyboards import KeyboardManager
+    
+    # Опциональные модули
+    try:
+        from database.operations import DatabaseManager
+        DATABASE_AVAILABLE = True
+    except ImportError as e:
+        logger.warning(f"⚠️ DatabaseManager недоступен: {e}")
+        DATABASE_AVAILABLE = False
+        
+    try:
+        from services.weather_api import WeatherService
+        WEATHER_SERVICE_AVAILABLE = True
+    except ImportError as e:
+        logger.warning(f"⚠️ WeatherService недоступен: {e}")
+        WEATHER_SERVICE_AVAILABLE = False
+        
+    try:
+        from services.scheduler import start_scheduler
+        SCHEDULER_AVAILABLE = True
+    except ImportError as e:
+        logger.warning(f"⚠️ Scheduler недоступен: {e}")
+        SCHEDULER_AVAILABLE = False
+
     # VoicePhotoHandler может быть опциональным
     try:
         from handlers.voice_photo import VoicePhotoHandler
-
         VOICE_PHOTO_AVAILABLE = True
     except ImportError as e:
         logger.warning(f"⚠️ VoicePhotoHandler недоступен: {e}")
@@ -97,18 +146,9 @@ class BotManager:
         """Проверка конфигурации перед запуском"""
         try:
             # Проверка токена бота
-            if not config.BOT_TOKEN or config.BOT_TOKEN == 'YOUR_BOT_TOKEN_HERE':
+            if not config.BOT_TOKEN:
                 logger.error("❌ Не установлен токен бота в конфигурации")
-                return False
-
-            # Проверка URL API погоды
-            if not config.WEATHER_API_URL:
-                logger.error("❌ Не установлен URL API погоды в конфигурации")
-                return False
-
-            # Проверка конфигурации базы данных
-            if not config.DATABASE_CONFIG or 'database' not in config.DATABASE_CONFIG:
-                logger.error("❌ Некорректная конфигурация базы данных")
+                logger.info("💡 Проверьте BOT_TOKEN в GitHub Secrets")
                 return False
 
             logger.info("✅ Конфигурация проверена успешно")
@@ -134,17 +174,32 @@ class BotManager:
 
             # Инициализация основных компонентов
             self.bot = TeleBot(config.BOT_TOKEN)
-            self.db = DatabaseManager(config.DATABASE_CONFIG['database'])
             self.keyboards = KeyboardManager()
-            self.weather_service = WeatherService(config.WEATHER_API_URL)
+
+            # Инициализация опциональных компонентов
+            if DATABASE_AVAILABLE:
+                self.db = DatabaseManager(config.DATABASE_CONFIG['database'])
+                logger.info("✅ База данных инициализирована")
+            else:
+                logger.info("⚠️ База данных недоступна")
+
+            if WEATHER_SERVICE_AVAILABLE:
+                self.weather_service = WeatherService(config.WEATHER_API_URL)
+                logger.info("✅ Погодный сервис инициализирован")
+            else:
+                logger.info("⚠️ Погодный сервис недоступен")
 
             logger.info("✅ Основные компоненты инициализированы")
 
             # Инициализация обработчиков
             self._initialize_handlers()
 
-            # Запуск планировщика
-            self.scheduler = start_scheduler(self.bot, self.db, self.weather_service)
+            # Запуск планировщика если доступен
+            if SCHEDULER_AVAILABLE and self.db and self.weather_service:
+                self.scheduler = start_scheduler(self.bot, self.db, self.weather_service)
+                logger.info("✅ Планировщик запущен")
+            else:
+                logger.info("⚠️ Планировщик недоступен")
 
             logger.info("✅ Все компоненты бота успешно инициализированы")
 
@@ -195,7 +250,6 @@ class BotManager:
 
     def _register_callback_handlers(self):
         """Регистрация обработчиков callback запросов"""
-
         @self.bot.callback_query_handler(func=lambda call: True)
         def handle_all_callbacks(call):
             """Централизованный обработчик callback запросов"""
@@ -221,10 +275,12 @@ class BotManager:
             # Информация о запуске
             logger.info("📊 Загруженные модули:")
             logger.info(f"   🎯 Обработчиков: {len(self.handlers)}")
-            logger.info("   🌤️ Погодный сервис")
-            logger.info("   📅 Планировщик уведомлений")
-            logger.info("   💾 База данных")
+            logger.info(f"   💾 База данных: {'✅' if DATABASE_AVAILABLE else '❌'}")
+            logger.info(f"   🌤️ Погодный сервис: {'✅' if WEATHER_SERVICE_AVAILABLE else '❌'}")
+            logger.info(f"   📅 Планировщик: {'✅' if SCHEDULER_AVAILABLE else '❌'}")
+            logger.info(f"   🎤 Голос/Фото: {'✅' if VOICE_PHOTO_AVAILABLE else '❌'}")
             logger.info(f"   📦 Версия: {BOT_VERSION}")
+            logger.info(f"   🚀 GitHub Actions: {'✅' if IS_GITHUB_ACTIONS else '❌'}")
 
             # Запуск опроса
             while not self._shutdown_requested:
@@ -295,34 +351,7 @@ def main():
 
     except Exception as e:
         logger.critical(f"❌ Критическая ошибка при запуске бота: {e}")
-
-        # Попытка перезапуска с экспоненциальной задержкой
-        retry_count = 0
-        max_retries = 5
-        while retry_count < max_retries:
-            retry_count += 1
-            delay = min(
-                30 * (2 ** (retry_count - 1)), 300
-            )  # Максимум 5 минут
-            logger.info(
-                f"🔄 Попытка перезапуска #{retry_count}/{max_retries} "
-                f"через {delay} секунд..."
-            )
-            time.sleep(delay)
-
-            try:
-                main()
-                break
-            except Exception as retry_error:
-                logger.error(
-                    f"❌ Ошибка при перезапуске #{retry_count}: {retry_error}"
-                )
-                if retry_count >= max_retries:
-                    logger.critical(
-                        "❌ Достигнуто максимальное количество "
-                        "попыток перезапуска. Завершение работы."
-                    )
-                    sys.exit(1)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -1,9 +1,11 @@
 name: Deploy Telegram Bot
 
 on:
+  workflow_dispatch:
   push:
     branches: [ main, master ]
-  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'
 
 jobs:
   deploy:
@@ -11,34 +13,36 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
-    
+      uses: actions/checkout@v4
+      
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.9'
-    
-    - name: Install dependencies
+        python-version: '3.10'
+        
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg portaudio19-dev
+        
+    - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
-    
-    - name: Create config file
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        pip install pytelegrambotapi requests schedule qrcode[pil] pillow pydub speechrecognition beautifulsoup4 python-dotenv
+        
+    - name: Create temp directories
       run: |
-        echo "import os" > config.py
-        echo "class Config:" >> config.py
-        echo "    BOT_TOKEN = os.environ.get('BOT_TOKEN', '')" >> config.py
-        echo "    WEATHER_API_URL = os.environ.get('WEATHER_API_URL', 'https://api.open-meteo.com/v1/forecast')" >> config.py
-        echo "    DATABASE_CONFIG = {" >> config.py
-        echo "        'database': os.environ.get('DATABASE_PATH', 'database.db')" >> config.py
-        echo "    }" >> config.py
-        echo "" >> config.py
-        echo "config = Config()" >> config.py
-    
-    - name: Run bot
+        mkdir -p temp_voice_files temp_photo_files logs
+        
+    - name: Run Telegram Bot
       env:
         BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-        WEATHER_API_URL: ${{ secrets.WEATHER_API_URL }}
-        DATABASE_PATH: ${{ secrets.DATABASE_PATH }}
+        WEATHER_API_URL: ${{ secrets.WEATHER_API_URL || 'https://api.open-meteo.com/v1/forecast' }}
+        DATABASE_PATH: ${{ secrets.DATABASE_PATH || ':memory:' }}
+        GITHUB_ACTIONS: 'true'
       run: |
+        echo "🔧 Проверка окружения..."
+        echo "BOT_TOKEN: ${BOT_TOKEN:0:10}..."
+        echo "Запуск бота на GitHub Actions..."
         python main.py
