@@ -1,6 +1,5 @@
 config.py
 __pycache__/
-database/
 logs/
 debug_subscription.py
 bot_database.db
